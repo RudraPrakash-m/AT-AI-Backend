@@ -47,6 +47,26 @@ const userSchema = new mongoose.Schema(
       type: Number,
       default: 500000,
     },
+    jobTitle: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    organization: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    bio: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    ollamaBaseUrl: {
+      type: String,
+      default: '',
+      trim: true,
+    },
   },
   { timestamps: true }
 );

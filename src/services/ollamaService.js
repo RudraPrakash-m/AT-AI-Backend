@@ -1,26 +1,90 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
-const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').trim().replace(/\/+$/, '');
+let runtimeOllamaUrl = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').trim().replace(/\/+$/, '');
 const DEFAULT_MODEL = (process.env.DEFAULT_MODEL || 'llama3.2').trim();
 
 /**
- * Fetches all models installed in the local Ollama instance
+ * Normalizes URL and strips trailing slashes
  */
-export async function getOllamaStatus() {
+export function normalizeOllamaUrl(url) {
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return runtimeOllamaUrl || 'http://127.0.0.1:11434';
+  }
+  let clean = url.trim();
+  if (!clean.startsWith('http://') && !clean.startsWith('https://')) {
+    clean = `https://${clean}`;
+  }
+  return clean.replace(/\/+$/, '');
+}
+
+/**
+ * Gets the current active runtime Ollama URL
+ */
+export function getActiveOllamaUrl(customUrl) {
+  return normalizeOllamaUrl(customUrl || runtimeOllamaUrl);
+}
+
+/**
+ * Updates the global fallback runtime Ollama URL
+ */
+export function setRuntimeOllamaUrl(newUrl) {
+  if (newUrl && typeof newUrl === 'string' && newUrl.trim()) {
+    runtimeOllamaUrl = normalizeOllamaUrl(newUrl);
+  }
+  return runtimeOllamaUrl;
+}
+
+/**
+ * Tests connection to any Ollama / Cloudflare Tunnel URL
+ */
+export async function testOllamaConnection(targetUrl) {
+  const normalizedUrl = normalizeOllamaUrl(targetUrl);
+  const startTime = Date.now();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
+
   try {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`);
-    if (!res.ok) throw new Error(`Ollama responded with status ${res.status}`);
+    const res = await fetch(`${normalizedUrl}/api/tags`, {
+      signal: controller.signal,
+      headers: {
+        'Accept': 'application/json',
+      },
+    });
+    clearTimeout(timeoutId);
+
+    const latencyMs = Date.now() - startTime;
+
+    if (!res.ok) {
+      return {
+        connected: false,
+        url: normalizedUrl,
+        latencyMs,
+        error: `Ollama endpoint returned HTTP status ${res.status} (${res.statusText})`,
+        models: [],
+        defaultModel: DEFAULT_MODEL,
+      };
+    }
+
     const data = await res.json();
     return {
       connected: true,
+      url: normalizedUrl,
+      latencyMs,
       models: data.models || [],
       defaultModel: DEFAULT_MODEL,
     };
   } catch (err) {
+    clearTimeout(timeoutId);
+    const latencyMs = Date.now() - startTime;
+    const isTimeout = err.name === 'AbortError';
     return {
       connected: false,
-      error: err.message,
+      url: normalizedUrl,
+      latencyMs,
+      error: isTimeout
+        ? 'Connection timed out after 8s. Check if your Cloudflare Tunnel is active.'
+        : (err.message || 'Unable to connect to Ollama / Cloudflare endpoint.'),
       models: [],
       defaultModel: DEFAULT_MODEL,
     };
@@ -28,10 +92,18 @@ export async function getOllamaStatus() {
 }
 
 /**
+ * Fetches models and connection status for given customUrl or active runtime URL
+ */
+export async function getOllamaStatus(customUrl) {
+  const target = getActiveOllamaUrl(customUrl);
+  return testOllamaConnection(target);
+}
+
+/**
  * Resolves frontend model ID to the exact local Ollama model tag
  */
-export async function resolveOllamaModel(requestedModel) {
-  const status = await getOllamaStatus();
+export async function resolveOllamaModel(requestedModel, customUrl) {
+  const status = await getOllamaStatus(customUrl);
   if (!status.connected || !status.models || status.models.length === 0) {
     return requestedModel || DEFAULT_MODEL;
   }
@@ -66,17 +138,24 @@ export async function resolveOllamaModel(requestedModel) {
     return baseMatch;
   }
 
-  // Return requestedModel as-is (will allow Ollama to attempt or return pull error)
+  // Return requestedModel as-is
   return requestedModel || DEFAULT_MODEL;
 }
 
 /**
- * Streams chat responses from local Ollama model
+ * Streams chat responses from local or tunnelled Ollama model
  */
-export async function streamOllamaChat({ messages, model = DEFAULT_MODEL, systemPrompt, temperature = 0.7 }, onChunk, onDone, onError) {
+export async function streamOllamaChat(
+  { messages, model = DEFAULT_MODEL, systemPrompt, temperature = 0.7, customUrl },
+  onChunk,
+  onDone,
+  onError
+) {
+  const targetBaseUrl = getActiveOllamaUrl(customUrl);
+
   try {
-    const resolvedModel = await resolveOllamaModel(model);
-    console.log(`[Ollama] Routing chat request to model: ${resolvedModel} (requested: ${model})`);
+    const resolvedModel = await resolveOllamaModel(model, targetBaseUrl);
+    console.log(`[Ollama] Routing chat request via [${targetBaseUrl}] to model: ${resolvedModel} (requested: ${model})`);
 
     const formattedMessages = [];
     let hasImages = false;
@@ -108,7 +187,7 @@ export async function streamOllamaChat({ messages, model = DEFAULT_MODEL, system
       },
     };
 
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+    const response = await fetch(`${targetBaseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -138,7 +217,7 @@ export async function streamOllamaChat({ messages, model = DEFAULT_MODEL, system
       if (hasImages && (errorMsg.toLowerCase().includes('multimodal') || errorMsg.toLowerCase().includes('not support'))) {
         errorMsg = '⚠️ The model (' + resolvedModel + ') is a text-only model and does not support image analysis.\n\nTo analyze images locally in Ollama:\n1. Run: `ollama pull llama3.2-vision` or `ollama pull llava` in your terminal.\n2. Select **Llama 3.2 Vision** or **LLaVA** in the model dropdown.';
       } else if (errorMsg.toLowerCase().includes('not found') || response.status === 404) {
-        errorMsg = '⚠️ The model (' + resolvedModel + ') was not found in your local Ollama.\n\nTo install it, run:\n```bash\nollama pull ' + resolvedModel + '\n```';
+        errorMsg = '⚠️ The model (' + resolvedModel + ') was not found in your active Ollama instance at ' + targetBaseUrl + '.\n\nTo install it, run:\n```bash\nollama pull ' + resolvedModel + '\n```';
       }
 
       throw new Error(errorMsg);

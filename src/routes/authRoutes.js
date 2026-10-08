@@ -12,6 +12,23 @@ function generate6DigitOtp() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+function formatUserProfile(user) {
+  return {
+    id: user._id,
+    name: user.name,
+    email: user.email,
+    avatarUrl: user.avatar || '',
+    jobTitle: user.jobTitle || '',
+    organization: user.organization || '',
+    bio: user.bio || '',
+    ollamaBaseUrl: user.ollamaBaseUrl || '',
+    plan: user.plan || 'Pro',
+    tokensUsed: user.tokensUsed || 0,
+    tokenLimit: user.tokenLimit || 500000,
+    createdAt: user.createdAt,
+  };
+}
+
 function createJwtToken(user) {
   return jwt.sign(
     {
@@ -122,16 +139,7 @@ router.post('/verify-otp', async (req, res) => {
       success: true,
       message: 'Account verified successfully!',
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        avatarUrl: user.avatar,
-        plan: user.plan,
-        tokensUsed: user.tokensUsed,
-        tokenLimit: user.tokenLimit,
-        createdAt: user.createdAt,
-      },
+      user: formatUserProfile(user),
     });
   } catch (err) {
     console.error('Verify OTP error:', err);
@@ -221,16 +229,7 @@ router.post('/login', async (req, res) => {
     res.json({
       success: true,
       token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        avatarUrl: user.avatar,
-        plan: user.plan,
-        tokensUsed: user.tokensUsed,
-        tokenLimit: user.tokenLimit,
-        createdAt: user.createdAt,
-      },
+      user: formatUserProfile(user),
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -239,23 +238,100 @@ router.post('/login', async (req, res) => {
 });
 
 /**
- * GET /api/auth/me
- * Get current authenticated user profile
+ * GET /api/auth/me or GET /api/auth/profile
+ * Get current authenticated user profile details
  */
-router.get('/me', requireAuth, async (req, res) => {
-  res.json({
-    user: {
-      id: req.user._id,
-      name: req.user.name,
-      email: req.user.email,
-      avatarUrl: req.user.avatar,
-      plan: req.user.plan,
-      tokensUsed: req.user.tokensUsed,
-      tokenLimit: req.user.tokenLimit,
-      createdAt: req.user.createdAt,
-    },
-  });
-});
+const getProfileHandler = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+    res.json({
+      success: true,
+      user: formatUserProfile(user),
+    });
+  } catch (err) {
+    console.error('Get profile error:', err);
+    res.status(500).json({ error: err.message || 'Failed to fetch user profile.' });
+  }
+};
+
+router.get('/me', requireAuth, getProfileHandler);
+router.get('/profile', requireAuth, getProfileHandler);
+
+/**
+ * PUT /api/auth/profile or PUT /api/auth/me
+ * Update authenticated user profile details
+ */
+const updateProfileHandler = async (req, res) => {
+  try {
+    const { name, email, jobTitle, organization, bio, avatar, avatarUrl } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    if (name !== undefined) {
+      const trimmedName = String(name).trim();
+      if (!trimmedName) {
+        return res.status(400).json({ error: 'Name cannot be empty.' });
+      }
+      user.name = trimmedName;
+    }
+
+    if (email !== undefined) {
+      const trimmedEmail = String(email).toLowerCase().trim();
+      if (!trimmedEmail) {
+        return res.status(400).json({ error: 'Email cannot be empty.' });
+      }
+      if (trimmedEmail !== user.email) {
+        const emailConflict = await User.findOne({ email: trimmedEmail, _id: { $ne: user._id } });
+        if (emailConflict) {
+          return res.status(400).json({ error: 'Email is already in use by another account.' });
+        }
+        user.email = trimmedEmail;
+      }
+    }
+
+    if (jobTitle !== undefined) {
+      user.jobTitle = String(jobTitle).trim();
+    }
+
+    if (organization !== undefined) {
+      user.organization = String(organization).trim();
+    }
+
+    if (bio !== undefined) {
+      user.bio = String(bio).trim();
+    }
+
+    if (req.body.ollamaBaseUrl !== undefined) {
+      user.ollamaBaseUrl = String(req.body.ollamaBaseUrl).trim();
+    }
+
+    if (avatar !== undefined) {
+      user.avatar = String(avatar).trim();
+    } else if (avatarUrl !== undefined) {
+      user.avatar = String(avatarUrl).trim();
+    }
+
+    const savedUser = await user.save();
+
+    res.json({
+      success: true,
+      message: 'Profile updated successfully.',
+      user: formatUserProfile(savedUser),
+    });
+  } catch (err) {
+    console.error('Update profile error:', err);
+    res.status(500).json({ error: err.message || 'Failed to update profile.' });
+  }
+};
+
+router.put('/profile', requireAuth, updateProfileHandler);
+router.put('/me', requireAuth, updateProfileHandler);
 
 /**
  * POST /api/auth/forgot-password
